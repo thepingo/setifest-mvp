@@ -44,33 +44,88 @@ export async function GET(request: Request) {
             return NextResponse.json({ error: "Missing SETLISTFM_API_KEY" }, { status: 500 });
         }
 
-        const res = await fetch(`https://api.setlist.fm/rest/1.0/artist/${mbid}/setlists?p=1`, {
-            headers: {
-                "Accept": "application/json",
-                "Accept-Language": "en",
-                "x-api-key": apiKey
-            }
-        });
+        const validSetlists: any[] = [];
+        let page = 1;
+        const maxPages = 5; // Safety limit to avoid infinite loops
+        let setlistsScanned = 0;
+        let skippedEmpty = 0;
+        let skippedOld = 0;
 
-        if (!res.ok) {
-            const upstreamBody = await res.text();
-            return NextResponse.json({
-                error: "Setlist.fm error",
-                upstreamStatus: res.status,
-                upstreamBody: upstreamBody.substring(0, 500)
-            }, { status: 502 });
+        while (validSetlists.length < limit && page <= maxPages) {
+            const res = await fetch(`https://api.setlist.fm/rest/1.0/artist/${mbid}/setlists?p=${page}`, {
+                headers: {
+                    "Accept": "application/json",
+                    "Accept-Language": "en",
+                    "x-api-key": apiKey
+                }
+            });
+
+            if (!res.ok) {
+                // If specific page fails, log and break loop to work with what we have
+                console.warn(`Setlist.fm error on page ${page}:`, res.status);
+                break;
+            }
+
+            const data = await res.json();
+            const pageSetlists = data.setlist || [];
+
+            if (pageSetlists.length === 0) break;
+
+            for (const setlist of pageSetlists) {
+                setlistsScanned++;
+
+                // Check if setlist has actual songs
+                let hasSongs = false;
+                if (setlist.sets && setlist.sets.set && Array.isArray(setlist.sets.set)) {
+                    hasSongs = setlist.sets.set.some((s: any) =>
+                        s.song && Array.isArray(s.song) && s.song.length > 0
+                    );
+                }
+
+                if (hasSongs) {
+                    // Date Filter: Current or Previous Year
+                    const parts = setlist.eventDate?.split("-");
+                    if (parts && parts.length === 3) {
+                        const year = parseInt(parts[2], 10);
+                        const currentYear = new Date().getFullYear();
+                        if (year === currentYear || year === currentYear - 1) {
+                            validSetlists.push(setlist);
+                        } else {
+                            skippedOld++;
+                        }
+                    } else {
+                        // Invalid date format count as old/skipped
+                        skippedOld++;
+                    }
+                } else {
+                    skippedEmpty++;
+                }
+
+                if (validSetlists.length >= limit) break;
+            }
+
+            // Pagination check
+            const total = data.total || 0;
+            const itemsPerPage = data.itemsPerPage || 20;
+            if (page * itemsPerPage >= total) break;
+
+            page++;
         }
 
-        const data = await res.json();
-        const allSetlists = data.setlist || [];
-        const usedSetlists = allSetlists.slice(0, limit);
+        const usedSetlists = validSetlists;
 
         if (usedSetlists.length === 0) {
             const emptyResult = {
                 artist: { name: "Unknown", mbid },
                 sources: [],
                 songs: [],
-                stats: { setlistsUsed: 0, totalUnionSongs: 0 }
+                stats: {
+                    setlistsUsed: 0,
+                    totalUnionSongs: 0,
+                    setlistsScanned,
+                    skippedEmpty,
+                    skippedOld
+                }
             };
             return NextResponse.json({
                 ...emptyResult,
@@ -147,7 +202,10 @@ export async function GET(request: Request) {
             songs: unionSongs,
             stats: {
                 setlistsUsed: sources.length,
-                totalUnionSongs: unionSongs.length
+                totalUnionSongs: unionSongs.length,
+                setlistsScanned,
+                skippedEmpty,
+                skippedOld
             }
         };
 

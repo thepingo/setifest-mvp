@@ -10,6 +10,7 @@ type SpotifyTrack = {
   uri?: string;
   url: string;
   durationMs: number;
+  source?: string;
 };
 
 type ArtistPlaylist = {
@@ -23,6 +24,7 @@ type ArtistPlaylist = {
     venue?: string;
     city?: string;
   };
+  debugStats?: any;
 };
 
 // Keep history typed slightly loosely for now or match specific fields
@@ -78,7 +80,14 @@ export default function Home() {
 
   /* Setlist Progress State */
   const [setlistProgress, setSetlistProgress] = useState("");
-  const [setlistStats, setSetlistStats] = useState<{ total: number; matched: number; missing: number; missingSetlists?: string[] } | null>(null);
+  const [setlistStats, setSetlistStats] = useState<{
+    total: number;
+    matched: number;
+    missing: number;
+    missingSetlists?: string[];
+    fallbackUsed?: boolean;
+    debugInfo?: any[];
+  } | null>(null);
   const [missingTracks, setMissingTracks] = useState<{ artist: string; song: string }[]>([]);
   const [isRetrying, setIsRetrying] = useState(false);
   const [showMissingPanel, setShowMissingPanel] = useState(false);
@@ -747,9 +756,13 @@ export default function Home() {
             setlistData = await setlistRes.json();
           }
 
-          if (!setlistData || !setlistData.songs || setlistData.songs.length === 0) {
-            missingSetlists.push(artistName);
-            continue;
+          if (!setlistData || !setlistData.songs) {
+            // NOTE: Empty songs is allowed now for fallback check
+            setlistData = { songs: [], sources: [] };
+          }
+
+          if (setlistData.songs.length === 0) {
+            console.log(`[setlist] No songs found in union for ${artistName}. Will attempt fallback.`);
           }
 
           const mostRecentSource = setlistData.sources?.[0];
@@ -765,84 +778,185 @@ export default function Home() {
               eventDate: mostRecentSource?.eventDate,
               venue: mostRecentSource?.venue?.name,
               city: mostRecentSource?.venue?.city
-            }
+            },
+            debugStats: setlistData.stats // Capture stats for debug
           };
 
           const songs = setlistData.songs;
           totalSongsCount += songs.length;
 
-          if (i === 0) {
-            setGenerationStatus("resolving");
-            console.debug(`[status] Transition: fetching -> resolving`);
-          }
+          if (songs.length > 0) {
+            // STANDARD PATH: Setlist found with songs
+            if (i === 0) {
+              setGenerationStatus("resolving");
+              console.debug(`[status] Transition: fetching -> resolving`);
+            }
 
-          // Step 2: Search Spotify for each song
-          for (let j = 0; j < songs.length; j++) {
-            const songName = songs[j];
-            setSetlistProgress(`Buscando canciones de ${artistName} en Spotify... (${j + 1}/${songs.length})`);
+            // Step 2: Search Spotify for each song
+            for (let j = 0; j < songs.length; j++) {
+              const songName = songs[j];
+              setSetlistProgress(`Buscando canciones de ${artistName} en Spotify... (${j + 1}/${songs.length})`);
 
-            const normalizeSongTitle = (title: string): string => {
-              return title.replace(/["'“”‘’]/g, '').replace(/\([^)]*\)/g, '').replace(/\[[^\]]*\]/g, '').replace(/\s*\/\s*/g, ' ').replace(/[+=:;!?'"&]/g, '').replace(/\s+/g, ' ').trim();
-            };
+              const normalizeSongTitle = (title: string): string => {
+                return title.replace(/["'“”‘’]/g, '').replace(/\([^)]*\)/g, '').replace(/\[[^\]]*\]/g, '').replace(/\s*\/\s*/g, ' ').replace(/[+=:;!?'"&]/g, '').replace(/\s+/g, ' ').trim();
+              };
 
-            const normalizeName = (s: string): string => {
-              return s
-                .toLowerCase()
-                .normalize("NFD")
-                .replace(/\p{Diacritic}/gu, "")
-                .replace(/[^a-z0-9\s]/g, "")
-                .replace(/\s+/g, " ")
-                .trim();
-            };
+              const normalizeName = (s: string): string => {
+                return s
+                  .toLowerCase()
+                  .normalize("NFD")
+                  .replace(/\p{Diacritic}/gu, "")
+                  .replace(/[^a-z0-9\s]/g, "")
+                  .replace(/\s+/g, " ")
+                  .trim();
+              };
 
-            const isArtistMatch = (targetArtist: string, trackArtists: string[]): boolean => {
-              const target = normalizeName(targetArtist);
-              if (!target) return false;
-              const words = target.split(" ").filter(w => w.length > 0);
+              const isArtistMatch = (targetArtist: string, trackArtists: string[]): boolean => {
+                const target = normalizeName(targetArtist);
+                if (!target) return false;
+                const words = target.split(" ").filter(w => w.length > 0);
 
-              return trackArtists.some(artistName => {
-                const normalized = normalizeName(artistName);
-                if (!normalized) return false;
+                return trackArtists.some(artistName => {
+                  const normalized = normalizeName(artistName);
+                  if (!normalized) return false;
 
-                // Exact match (normalized)
-                if (normalized === target) return true;
+                  // Exact match (normalized)
+                  if (normalized === target) return true;
 
-                // Fallback for multi-word targets
-                if (words.length >= 2) {
-                  return normalized.includes(target) || target.includes(normalized);
-                }
+                  // Fallback for multi-word targets
+                  if (words.length >= 2) {
+                    return normalized.includes(target) || target.includes(normalized);
+                  }
 
-                return false;
-              });
-            };
+                  return false;
+                });
+              };
 
-            const normalizedSong = normalizeSongTitle(songName);
-            try {
-              const spotifyRes = await fetch(`/api/spotify/search?track=${encodeURIComponent(normalizedSong)}&artist=${encodeURIComponent(artistName)}`);
+              const normalizedSong = normalizeSongTitle(songName);
+              try {
+                const spotifyRes = await fetch(`/api/spotify/search?track=${encodeURIComponent(normalizedSong)}&artist=${encodeURIComponent(artistName)}`);
 
-              if (spotifyRes.ok) {
-                const resolution = await spotifyRes.json();
+                if (spotifyRes.ok) {
+                  const resolution = await spotifyRes.json();
 
-                // If it's a valid resolution (strict or fallback)
-                if (resolution && resolution.id) {
-                  const resolvedTrack = {
-                    ...resolution,
-                    artist: artistName // Keep search artist for primary display
-                  };
-                  resultsByArtist[artistName].tracks.push(resolvedTrack);
-                  if (resolvedTrack.uri) {
-                    playlistUris.push(resolvedTrack.uri);
+                  // If it's a valid resolution (strict or fallback)
+                  if (resolution && resolution.id) {
+                    const resolvedTrack = {
+                      ...resolution,
+                      artist: artistName, // Keep search artist for primary display
+                      source: 'setlist'
+                    };
+                    resultsByArtist[artistName].tracks.push(resolvedTrack);
+                    if (resolvedTrack.uri) {
+                      playlistUris.push(resolvedTrack.uri);
+                    }
+                  } else {
+                    console.debug(`[setlist] No resolution found for: ${artistName} - ${songName}`);
+                    tracksMissing.push(`${artistName} - ${songName}`);
                   }
                 } else {
-                  console.debug(`[setlist] No resolution found for: ${artistName} - ${songName}`);
-                  tracksMissing.push({ artist: artistName, song: songName });
+                  tracksMissing.push(`${artistName} - ${songName}`);
                 }
-              } else {
-                tracksMissing.push({ artist: artistName, song: songName });
+              } catch (err) {
+                console.error(`[setlist] Error searching for song: ${songName}`, err);
+                tracksMissing.push(`${artistName} - ${songName}`);
               }
-            } catch (err) {
-              console.error(`[setlist] Error searching for song: ${songName}`, err);
-              tracksMissing.push({ artist: artistName, song: songName });
+            }
+          } else {
+            // FALLBACK PATH: No recent setlists -> Use Spotify Top Tracks
+            console.log(`[setlist] No recent setlists for ${artistName}. Attempting Spotify Fallback.`);
+            setSetlistProgress(`Usando Top Tracks de Spotify para ${artistName}...`);
+
+            try {
+              // Use generic search restricted to artist to simulate "Top Tracks" or "Popular"
+              // Normalize artist name for search input
+              const normalizeInput = (s: string) => s.replace(/^["']|["']$/g, "").trim().replace(/\s+/g, " ");
+              const normalizedArtistInput = normalizeInput(artistName);
+
+              // Helper to fetch keys
+              // Helper to fetch keys
+              const fetchFallback = async (query: string, limit: number = 10) => {
+                const res = await fetch(`/api/spotify/search?q=${encodeURIComponent(query)}&limit=${limit}`);
+                if (res.ok) {
+                  const data = await res.json();
+                  return Array.isArray(data) ? data : [];
+                }
+                return [];
+              };
+
+              // Attempt 1: Quoted
+              let usedQuery = `artist:"${normalizedArtistInput}"`;
+              let fallbackTracks = await fetchFallback(usedQuery, 10);
+              let fallbackMethod = "quoted";
+
+              // Attempt 2: Unquoted if empty
+              if (fallbackTracks.length === 0) {
+                console.log(`[setlist] Fallback attempt 1 (quoted) failed for ${normalizedArtistInput}. Retrying unquoted.`);
+                usedQuery = `artist:${normalizedArtistInput}`;
+                fallbackTracks = await fetchFallback(usedQuery, 10);
+                fallbackMethod = "unquoted";
+              }
+
+              // Strict Filter Logic
+              const normalizeName = (s: string) => s.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "").replace(/[^a-z0-9\s]/g, "").trim();
+              const isMatch = (t: any) => {
+                const tArtist = normalizeName(t.artist);
+                const targetNormalized = normalizeName(normalizedArtistInput);
+                return tArtist.includes(targetNormalized) || targetNormalized.includes(tArtist);
+              };
+
+              let validFallback = fallbackTracks.filter(isMatch);
+
+              // 2) Extension: If < 10, fetch more (up to 50)
+              if (validFallback.length < 10 && fallbackTracks.length > 0) {
+                console.log(`[setlist] Fallback yielded only ${validFallback.length} tracks. Extending search...`);
+                const extendedTracks = await fetchFallback(usedQuery, 50);
+                const validExtended = extendedTracks.filter(isMatch);
+
+                // Merge unique tracks
+                const existingIds = new Set(validFallback.map((t: any) => t.id));
+                for (const t of validExtended) {
+                  if (validFallback.length >= 10) break;
+                  if (!existingIds.has(t.id)) {
+                    validFallback.push(t);
+                    existingIds.add(t.id);
+                  }
+                }
+                // Update raw count for debug to reflect we fetched more
+                fallbackTracks = extendedTracks;
+              }
+
+              // DEBUG LOGGING
+              if (process.env.NODE_ENV !== 'production' || window.location.search.includes('debug=1')) {
+                console.log(`[debug-fallback] ${artistName}: Raw=${fallbackTracks.length}, Filtered=${validFallback.length}`);
+              }
+
+              // Store fallback debug stats
+              resultsByArtist[artistName].debugStats = {
+                ...resultsByArtist[artistName].debugStats,
+                rawCount: fallbackTracks.length,
+                filteredCount: validFallback.length
+              };
+
+              if (validFallback.length > 0) {
+                validFallback.forEach((t: any) => {
+                  const trackObj = {
+                    ...t,
+                    artist: artistName,
+                    source: 'spotify_top_tracks'
+                  };
+                  resultsByArtist[artistName].tracks.push(trackObj);
+                  if (trackObj.uri) playlistUris.push(trackObj.uri);
+                });
+                // Update original count to reflect we found N tracks
+                resultsByArtist[artistName].originalSongCount = validFallback.length;
+                // DO NOT add to missingSetlists since we found content
+              } else {
+                missingSetlists.push(artistName);
+              }
+            } catch (fbErr) {
+              console.error("Fallback error", fbErr);
+              missingSetlists.push(artistName);
             }
           }
         } catch (err) {
@@ -851,10 +965,37 @@ export default function Home() {
       }
 
       // Final state updates (atomic)
-      const finalPlaylistData = Object.values(resultsByArtist);
-      setPlaylist(finalPlaylistData);
+      // 1. Ensure order matches artistChips
+      let orderedPlaylistData = artistChips
+        .map(name => resultsByArtist[name])
+        .filter(Boolean);
 
-      const matchedCount = playlistUris.length;
+      // 2. Global Dedupe by URI
+      const seenUris = new Set<string>();
+      const dedupedPlaylistData = orderedPlaylistData.map(group => {
+        const uniqueTracks = group.tracks.filter(track => {
+          if (!track.uri) return true; // Keep tracks without URI? Usually implies error or not matched, but let's keep to show properly or filter later. Actually matched tracks have URI.
+          if (seenUris.has(track.uri)) return false;
+          seenUris.add(track.uri);
+          return true;
+        });
+        return {
+          ...group,
+          tracks: uniqueTracks
+        };
+      });
+
+      setPlaylist(dedupedPlaylistData);
+
+      // 3. Recalculate Stats from Deduped Data
+      const uniqueMatchedUris = new Set<string>();
+      dedupedPlaylistData.forEach(g => {
+        g.tracks.forEach(t => {
+          if (t.uri) uniqueMatchedUris.add(t.uri);
+        });
+      });
+      const matchedCount = uniqueMatchedUris.size;
+
       const missingObjects = tracksMissing.map(m => {
         const parts = m.split(" - ");
         return { artist: parts[0], song: parts[1] };
@@ -866,7 +1007,19 @@ export default function Home() {
         total: totalSongsCount,
         matched: matchedCount,
         missing: missingCount,
-        missingSetlists: missingSetlists.length > 0 ? missingSetlists : undefined
+        missingSetlists: missingSetlists.length > 0 ? missingSetlists : undefined,
+        fallbackUsed: dedupedPlaylistData.some(g => g.tracks.some(t => t.source === 'spotify_top_tracks')),
+        debugInfo: Object.values(resultsByArtist).map(r => ({
+          artist: r.artist,
+          scanned: (r as any).debugStats?.setlistsScanned || 0,
+          used: (r as any).debugStats?.setlistsUsed || 0,
+          skippedEmpty: (r as any).debugStats?.skippedEmpty || 0,
+          skippedOld: (r as any).debugStats?.skippedOld || 0,
+          fallback: r.tracks.some(t => t.source === 'spotify_top_tracks'),
+          rawCount: (r as any).debugStats?.rawCount,
+          filteredCount: (r as any).debugStats?.filteredCount,
+          finalCount: dedupedPlaylistData.find(g => g.artist === r.artist)?.tracks.length || 0
+        }))
       });
 
       // Calculate final status
@@ -880,14 +1033,14 @@ export default function Home() {
       console.debug(`[status] Totals: setlist=${totalSongsCount}, matched=${matchedCount}, missing=${missingCount}`);
 
       // Consistency Check (Step 3)
-      const sumMatched = finalPlaylistData.reduce((acc, g) => acc + g.tracks.length, 0);
-      const sumTotal = finalPlaylistData.reduce((acc, g) => acc + g.originalSongCount, 0);
+      const sumMatched = dedupedPlaylistData.reduce((acc, g) => acc + g.tracks.length, 0);
+      const sumTotal = dedupedPlaylistData.reduce((acc, g) => acc + g.originalSongCount, 0);
       if (sumMatched !== matchedCount || sumTotal !== totalSongsCount) {
         console.debug(`[consistency] Stats mismatch! globalMatch=${matchedCount} vs sumGroupMatch=${sumMatched}, globalTotal=${totalSongsCount} vs sumGroupTotal=${sumTotal}`);
       }
 
-      if (finalPlaylistData.length > 0) {
-        addToHistory(finalPlaylistData, artistChips);
+      if (dedupedPlaylistData.length > 0) {
+        addToHistory(dedupedPlaylistData, artistChips);
       }
 
     } catch (e) {
@@ -1394,7 +1547,7 @@ export default function Home() {
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                   </svg>
-                  {generationStatus === "fetching" ? "Buscando últimos conciertos…" : "Buscando canciones en Spotify…"}
+                  {generationStatus === "fetching" ? "Buscando conciertos recientes con repertorio real…" : "Emparejando canciones en Spotify…"}
                 </span>
                 {setlistProgress && <span className="text-[10px] opacity-70 font-normal">{setlistProgress}</span>}
               </span>
@@ -1419,20 +1572,61 @@ export default function Home() {
                 </div>
                 <div>
                   <h4 className="font-bold text-lg leading-tight">
-                    {generationStatus === "success" ? "¡Generación Exitosa!" :
-                      generationStatus === "partial" ? "Generación Parcial" :
-                        "Error en Generación"}
+                    {generationStatus === "success" ? "¡Playlist lista!" :
+                      generationStatus === "partial" ? "Playlist generada con faltantes" :
+                        "No se pudo generar"}
                   </h4>
                   <p className="text-xs opacity-70">
-                    {generationStatus === "success" ? "Todas las canciones encontradas." :
-                      generationStatus === "partial" ? "Algunas canciones no están en Spotify." :
-                        "No se pudo encontrar ninguna canción."}
+                    {generationStatus === "success" ? "Todas las canciones han sido emparejadas." :
+                      generationStatus === "partial" ? "Algunas canciones del setlist no están en Spotify." :
+                        "Intenta ajustar los nombres de los artistas."}
                   </p>
                   <p className="text-[10px] opacity-40 mt-1 italic">
-                    Usando canciones combinadas de los últimos 5 conciertos
+                    Basado en los últimos 5 conciertos
                   </p>
+
+                  {/* Fallback Warning */}
+                  {setlistStats.fallbackUsed && (
+                    <div className="mt-2 p-2 rounded bg-yellow-500/10 border border-yellow-500/20 text-[10px] text-yellow-200/80 flex items-start gap-2">
+                      <span className="text-yellow-500 font-bold">⚠</span>
+                      <span>Algunos artistas no tienen conciertos recientes disponibles; se han usado sus canciones más escuchadas.</span>
+                    </div>
+                  )}
                 </div>
               </div>
+
+              {/* Debug Section */}
+              {typeof window !== 'undefined' && new URLSearchParams(window.location.search).get("debug") === "1" && setlistStats.debugInfo && (
+                <div className="mt-3 border-t border-white/5 pt-2">
+                  <p className="text-[9px] font-mono text-white/30 uppercase mb-1">Debug Stats</p>
+                  <div className="grid grid-cols-1 gap-1 max-h-32 overflow-y-auto text-[9px] font-mono text-white/50 bg-black/20 p-2 rounded">
+                    {setlistStats.debugInfo.map((info: any, idx: number) => (
+                      <div key={idx} className="flex justify-between border-b border-white/5 last:border-0 pb-1">
+                        <span>{info.artist}</span>
+                        <div className="flex gap-2 flex-wrap justify-end">
+                          {info.fallback ? (
+                            <>
+                              <span className="text-yellow-500/80">Raw:{info.rawCount ?? '?'}</span>
+                              <span className="text-yellow-500/80">Filt:{info.filteredCount ?? '?'}</span>
+                              <span className="text-green-500/80">Final:{info.finalCount ?? '?'}</span>
+                            </>
+                          ) : (
+                            <>
+                              <span>Scan:{info.scanned}</span>
+                              <span>Used:{info.used}</span>
+                              <span>Skip0:{info.skippedEmpty}</span>
+                              <span>SkipOld:{info.skippedOld}</span>
+                            </>
+                          )}
+                          <span className={info.fallback ? "text-yellow-500 font-bold" : "text-green-500 font-bold"}>
+                            {info.fallback ? "FALLBACK" : "SETLIST"}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-3 gap-2 text-center border-t border-white/5 pt-3">
                 <div>
@@ -1796,38 +1990,40 @@ export default function Home() {
       </div>
 
       {/* Name Modal */}
-      {showNameModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-          <div className="w-full max-w-md bg-[#1A1A1C] border border-[#2A2A2E] rounded-xl p-6 shadow-2xl flex flex-col gap-4 animate-in zoom-in-95 duration-200">
-            <h3 className="text-lg font-bold text-white">Nombre de la playlist</h3>
-            <input
-              type="text"
-              value={customPlaylistName}
-              onChange={(e) => setCustomPlaylistName(e.target.value)}
-              className="w-full bg-[#111] border border-[#333] rounded-lg px-4 py-2 text-white focus:outline-none focus:border-[#1DB954] transition-colors"
-              autoFocus
-            />
-            <div className="flex gap-3 justify-end mt-2">
-              <button
-                onClick={() => setShowNameModal(false)}
-                className="px-4 py-2 rounded-lg text-sm font-medium text-[var(--secondary)] hover:text-white transition-colors"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={() => {
-                  setShowNameModal(false);
-                  createSpotifyPlaylist(undefined, undefined, customPlaylistName);
-                }}
-                disabled={!customPlaylistName.trim()}
-                className="px-4 py-2 rounded-lg text-sm font-bold bg-[#1DB954] text-black hover:bg-[#1ed760] disabled:opacity-50 transition-colors"
-              >
-                Crear
-              </button>
+      {
+        showNameModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+            <div className="w-full max-w-md bg-[#1A1A1C] border border-[#2A2A2E] rounded-xl p-6 shadow-2xl flex flex-col gap-4 animate-in zoom-in-95 duration-200">
+              <h3 className="text-lg font-bold text-white">Nombre de la playlist</h3>
+              <input
+                type="text"
+                value={customPlaylistName}
+                onChange={(e) => setCustomPlaylistName(e.target.value)}
+                className="w-full bg-[#111] border border-[#333] rounded-lg px-4 py-2 text-white focus:outline-none focus:border-[#1DB954] transition-colors"
+                autoFocus
+              />
+              <div className="flex gap-3 justify-end mt-2">
+                <button
+                  onClick={() => setShowNameModal(false)}
+                  className="px-4 py-2 rounded-lg text-sm font-medium text-[var(--secondary)] hover:text-white transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={() => {
+                    setShowNameModal(false);
+                    createSpotifyPlaylist(undefined, undefined, customPlaylistName);
+                  }}
+                  disabled={!customPlaylistName.trim()}
+                  className="px-4 py-2 rounded-lg text-sm font-bold bg-[#1DB954] text-black hover:bg-[#1ed760] disabled:opacity-50 transition-colors"
+                >
+                  Crear
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )
+      }
     </main>
   );
 }

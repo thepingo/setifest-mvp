@@ -32,6 +32,7 @@ export async function GET(request: Request) {
     const artist = searchParams.get("artist");
     const track = searchParams.get("track");
     const q = searchParams.get("q");
+    const limitParam = searchParams.get("limit");
 
     if (!artist && !q && !track) {
         return NextResponse.json({ error: "Missing parameters" }, { status: 400 });
@@ -41,11 +42,14 @@ export async function GET(request: Request) {
         return NextResponse.json({ error: "Server Configuration Error" }, { status: 500 });
     }
 
+    // Parse limit
+    const effectiveLimit = limitParam ? Math.min(Math.max(parseInt(limitParam, 10), 1), 50) : (q ? 10 : 20);
+
     // Resolve mode logic
     const isResolveMode = !!(artist && track && !q);
     const cacheKey = isResolveMode
         ? `spotify:resolve:${normalize(artist)}:${normalize(track)}`
-        : `spotify:search:${q || artist || track}`;
+        : `spotify:search:${q || artist || track}:${effectiveLimit}`;
 
     try {
         const cached = await cache.get(cacheKey);
@@ -135,8 +139,8 @@ export async function GET(request: Request) {
         } else {
             // Legacy search
             const searchUrl = q
-                ? `https://api.spotify.com/v1/search?q=${encodeURIComponent(q)}&type=track&limit=5`
-                : `https://api.spotify.com/v1/search?q=artist:${encodeURIComponent(`"${artist}"`)}&type=track&limit=20`;
+                ? `https://api.spotify.com/v1/search?q=${encodeURIComponent(q)}&type=track&limit=${effectiveLimit}`
+                : `https://api.spotify.com/v1/search?q=artist:${encodeURIComponent(`"${artist}"`)}&type=track&limit=${effectiveLimit}`;
 
             const data = await fetchSpotify(searchUrl);
             const items = data?.tracks?.items || [];
