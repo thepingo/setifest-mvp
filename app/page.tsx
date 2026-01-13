@@ -449,7 +449,7 @@ export default function Home() {
     const remainingCount = artists.length - 2;
     const topArtists = remainingCount > 0 ? `${firstTwo} +${remainingCount}` : firstTwo;
     const dateStr = new Date().toLocaleDateString();
-    return `Setifest - ${topArtists} (${dateStr})`;
+    return `SetiFest - ${topArtists} (${dateStr})`;
   };
 
   /* Computed State for Strict Creation Logic - Source of Truth: generationStatus & setlistStats */
@@ -1220,7 +1220,7 @@ export default function Home() {
         <div className="flex flex-col items-center gap-4 w-full">
           <div className="flex w-full justify-between items-center">
             <h1 className="text-4xl font-bold tracking-tight text-[var(--foreground)]">
-              Setifest MVP
+              SetiFest
             </h1>
 
             <div className="flex items-center gap-3">

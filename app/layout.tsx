@@ -5,8 +5,8 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Setifest MVP",
-  description: "Minimalist festival playlist generator",
+  title: "SetiFest",
+  description: "Generador de playlists para festivales",
 };
 
 export default function RootLayout({
